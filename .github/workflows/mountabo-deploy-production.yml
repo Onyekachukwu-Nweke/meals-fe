@@ -1,0 +1,44 @@
+name: meals-fe deploy (main)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Serialize deploys to this target: while a run is in progress, a newer run
+# queues behind it rather than cancelling it, so a half-applied deploy is never
+# interrupted. Group is per app+environment to match mountabo's local deploy lock.
+concurrency:
+  group: mountabo-deploy-meals-fe-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy deploy script to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "deploy.sh"
+          target: "/tmp/meals-fe-deploy"
+
+      - name: Deploy on the server
+        uses: appleboy/ssh-action@v1.1.0
+        env:
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: DEPLOY_DIR
+          script: |
+            chmod +x /tmp/meals-fe-deploy/deploy.sh
+            /tmp/meals-fe-deploy/deploy.sh main
