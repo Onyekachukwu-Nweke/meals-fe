@@ -1,0 +1,9 @@
+services:
+  meal-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meal-app
+    ports:
+      - "8010:80"
+    restart: unless-stopped
