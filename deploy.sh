@@ -28,9 +28,22 @@ fi
 export COMPOSE_PROJECT_NAME='meals-fe-main'
 
 # Write .env (ports + your environment variables) for docker compose.
-cat > .env <<EOF
-
-EOF
+: > .env
+written=0
+for k in ${MOUNTABO_ENV_KEYS:-}; do
+  v="${!k-}"
+  if [ -z "$v" ]; then
+    echo "warning: env var $k is empty (set it in the secrets tab, then redeploy)"
+    continue
+  fi
+  printf '%s=%s\n' "$k" "$v" >> .env
+  written=$((written + 1))
+done
+echo "wrote $written environment variable(s) to .env"
+if [ -n "${MOUNTABO_ENV_KEYS:-}" ] && [ "$written" -eq 0 ]; then
+  echo "error: environment variables were configured but none reached .env" >&2
+  exit 1
+fi
 
 # Create any per-service env files the compose references (env_file:) from the
 # .env above, so the configured variables reach every service.
