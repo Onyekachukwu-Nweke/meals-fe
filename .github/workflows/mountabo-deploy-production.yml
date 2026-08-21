@@ -21,28 +21,72 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Copy deploy script to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "deploy.sh"
-          target: "/tmp/meals-fe-deploy"
+      - name: Build compose images on the runner
+        run: |
+          cd .
+          compose=""
+          for cf in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+            if [ -f "$cf" ]; then compose="$cf"; break; fi
+          done
+          [ -n "$compose" ] || { echo "no compose file found under ." >&2; exit 1; }
+          # --no-interpolate: only the structure is needed (which services declare a
+          # build:), and the runner has no .env, so unset ${VARS} must not fail here.
+          services=$(docker compose -f "$compose" config --no-interpolate --format json \
+            | jq -r '.services | to_entries[] | select(.value.build != null) | .key')
+          tags=""
+          rm -f mountabo.image.override.yml
+          for s in $services; do
+            svc=$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')
+            tag="mountabo/meals-fe-$svc:${{ github.sha }}"
+            [ -f mountabo.image.override.yml ] || echo "services:" > mountabo.image.override.yml
+            printf '  %s:\n    image: %s\n' "$s" "$tag" >> mountabo.image.override.yml
+            tags="$tags $tag"
+          done
+          # A compose stack with no build: services has nothing to offload — its
+          # images are all pulled, so the server just pulls them on up. Skip the
+          # tarball + override entirely (the ship + load steps handle their absence).
+          if [ -n "$tags" ]; then
+            docker compose -f "$compose" -f mountabo.image.override.yml build
+            docker save $tags | zstd -T0 -o image.tar.zst
+          else
+            echo "no build: services in compose; images will be pulled on the server"
+          fi
+
+      - name: Ship image and deploy script to the server
+        timeout-minutes: 10
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          # rsync the built image tarball + deploy.sh (+ compose image override)
+          # to the box over SSH. rsync --partial resumes a dropped transfer; no -z
+          # because the tarball is already zstd-compressed. The key never lands in
+          # the repo — it is a run-scoped temp file removed on exit.
+          key="$(mktemp)"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SERVER_SSH_KEY" > "$key"
+          chmod 600 "$key"
+          ssh_opts="ssh -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          ssh -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "$SERVER_USER@$SERVER_HOST" "mkdir -p /tmp/meals-fe-deploy"
+          # deploy.sh is always shipped; the tarball (and compose image override)
+          # only when the build produced them — a pull-only compose stack has none.
+          srcs="deploy.sh"
+          for f in image.tar.zst mountabo.image.override.yml; do [ -f "$f" ] && srcs="$srcs $f"; done
+          rsync -a --partial -e "$ssh_opts" $srcs \
+            "$SERVER_USER@$SERVER_HOST:/tmp/meals-fe-deploy/"
 
       - name: Deploy on the server
         uses: appleboy/ssh-action@v1.1.0
         env:
-          ewjhbkr: ${{ secrets.ewjhbkr }}
-          fhfjkfjks: ${{ secrets.fhfjkfjks }}
-          sfdnfdsjfdsdjklfds: ${{ secrets.sfdnfdsjfdsdjklfds }}
           DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
-          MOUNTABO_ENV_KEYS: "ewjhbkr fhfjkfjks sfdnfdsjfdsdjklfds"
+          MOUNTABO_ENV_KEYS: ""
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: ewjhbkr,fhfjkfjks,sfdnfdsjfdsdjklfds,DEPLOY_DIR,MOUNTABO_ENV_KEYS
+          envs: DEPLOY_DIR,MOUNTABO_ENV_KEYS
           script: |
             chmod +x /tmp/meals-fe-deploy/deploy.sh
             /tmp/meals-fe-deploy/deploy.sh main
